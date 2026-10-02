@@ -37,14 +37,73 @@ const SECRET_PAIRS = new Set([
 // `token` next to these names a count or a pointer, not a credential.
 const NOT_AFTER = new Set(['count', 'counts', 'id', 'ids', 'index', 'file', 'path', 'limit', 'size', 'type', 'usage', 'budget', 'length', 'name'])
 const NOT_BEFORE = new Set(['max', 'min', 'num', 'total', 'remaining'])
-export function nameIsSecret(name: string): boolean {
-  const parts = name
+// A name ending in one of these describes a secret without holding it: a count,
+// a time, a kind (`tokenExpiresAt`, `token_count`). Never a credential.
+const METADATA_SUFFIX = new Set([
+  'count', 'counts', 'length', 'len', 'size', 'limit', 'index', 'budget', 'usage', 'type', 'kind',
+  'at', 'expires', 'expiry', 'expiration', 'ttl', 'age', 'created', 'updated', 'issued', 'scope', 'scopes',
+])
+// A name ending in one of these points at a secret (its file, path, env var,
+// header or URL), but the value is only exempt when it also looks like a pointer:
+// `PASSWORD_FILE=CorrectHorse99!` is still a password.
+const POINTER_SUFFIX = new Set([
+  'file', 'files', 'filename', 'path', 'paths', 'dir', 'directory', 'name', 'names', 'env', 'var', 'variable',
+  'field', 'header', 'url', 'uri', 'endpoint', 'arn', 'ref', 'location',
+])
+// Words whose `_id` is itself a secret (Vault's `secret_id`), unlike `refresh_token_id`.
+const ID_IS_SECRET = new Set(['secret', 'password', 'passwd', 'pwd', 'passphrase', 'credential', 'credentials'])
+
+function nameParts(name: string): string[] {
+  return name
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .map(part => part.replace(/\d+$/, ''))
     .filter(Boolean)
+}
+
+// How a secret-looking name relates to its value: 'pointer' names are exempt only
+// when the value is a pointer too; 'id' names are opaque identifiers.
+export function nameRole(name: string): 'holds' | 'pointer' | 'id' | 'metadata' {
+  const parts = nameParts(name)
+  const last = parts[parts.length - 1] ?? ''
+  if (parts.length < 2) return 'holds'
+  if (METADATA_SUFFIX.has(last)) return 'metadata'
+  if (last === 'id' || last === 'ids') return parts.slice(0, -1).some(p => ID_IS_SECRET.has(p)) ? 'holds' : 'id'
+  if (POINTER_SUFFIX.has(last)) return 'pointer'
+  return 'holds'
+}
+
+// A value that names where a secret lives instead of being one.
+export function looksLikePointer(value: string): boolean {
+  if (isPathLike(value)) return true
+  if (/^arn:/i.test(value)) return true
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return true
+  if (isEnvName(value)) return true
+  // A bare file name with an extension (`token.txt`, `client-secret.json`).
+  if (/^[\w.-]+\.(?:txt|json|ya?ml|pem|key|env|cfg|conf|ini|toml|p12|pfx|crt)$/i.test(value)) return true
+  // A short header name (`X-Api-Key`, `Authorization`).
+  if (/^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*$/.test(value) && value.length <= 32 && /-|^[A-Z][a-z]+$/.test(value)) return true
+  return false
+}
+
+// The name of an environment variable (`DB_PASSWORD_PROD`, `API_KEY_V2`), not a
+// value: upper-case words, at least one short one, digits only in a trailing `V2`.
+// A shouted passphrase (`CORRECT_HORSE_BATTERY_STAPLE`) or code (`AB12_CD34`) is not.
+function isEnvName(value: string): boolean {
+  const segs = value.split('_')
+  if (segs.length < 2) return false
+  const body = /^V\d{1,3}$/.test(segs[segs.length - 1] ?? '') ? segs.slice(0, -1) : segs
+  if (body.length < 2 && segs.length === body.length) return false
+  if (!body.every(s => /^[A-Z]+$/.test(s))) return false
+  if (!body.some(s => s.length <= 3)) return false
+  return !body.every(s => s.length >= 5)
+}
+export function nameIsSecret(name: string): boolean {
+  const parts = nameParts(name)
   if (parts.length === 1 && parts[0] === 'pass') return true
+  const role = nameRole(name)
+  if (role === 'metadata' || role === 'id') return false
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i] ?? ''
     if (part === 'token' && (NOT_AFTER.has(parts[i + 1] ?? '') || NOT_BEFORE.has(parts[i - 1] ?? ''))) continue
@@ -96,15 +155,17 @@ const RULES: Rule[] = [
   // scheme://user:password@host
   {
     kind: 'url-credentials',
-    pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@'"]+:([^\s@'"/]{6,})@[^\s'"]+/dgi,
+    pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@'"]*:([^\s@'"]{6,})@[^\s'"]+/dgi,
     group: 1,
     entropy: 2.5,
     labelled: true,
+    // `host:8080/path@x` is a port and a path, not a password.
+    test: v => !/^\d{1,5}(?:\/|$)/.test(v),
   },
   // ?api_key=... / &token=... in URLs.
   {
     kind: 'url-param',
-    pattern: /[?&]((?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|key))=([^\s&#'"]{12,})/dgi,
+    pattern: /[?&]((?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password))=([^\s&#'"]{12,})/dgi,
     group: 2,
     entropy: 3.5,
     labelled: true,
@@ -158,6 +219,16 @@ const RULES: Rule[] = [
     labelled: true,
     shaped: true,
   },
+  // YAML `password: correct horse battery staple`, unquoted with spaces.
+  {
+    kind: 'generic-secret',
+    pattern: /^[ \t]*(?:-[ \t]+)?((?:[A-Za-z_][\w.-]*[_.-])?(?:password|passwd|passphrase|pwd))[ \t]*:[ \t]+(?!["'$|>&*{[])([^\s'"#][^'"#\n]*\s[^'"#\n]*?)[ \t]*(?:#.*)?$/dgim,
+    name: 1,
+    group: 2,
+    entropy: 3,
+    labelled: true,
+    shaped: true,
+  },
   // --password=value / --api-key value / curl -u user:password on a command line.
   {
     kind: 'cli-secret',
@@ -172,7 +243,7 @@ const RULES: Rule[] = [
   },
   {
     kind: 'cli-secret',
-    pattern: /(?:^|\s)(?:-u|--user)\s+["']?[^\s:'"]+:(?!\$)([^\s'"]{6,256})/dg,
+    pattern: /(?:^|\s)(?:-u\s*|--user(?:=|\s+))["']?[^\s:'"]+:(?!\$)([^\s'"]{6,256})/dg,
     group: 1,
     entropy: 2.5,
     labelled: true,
@@ -186,7 +257,7 @@ const STRICT_PLACEHOLDER = /^(.)\1+$|x{8,}|X{8,}|0{8,}|EXAMPLE(?:KEY)?$|<[^>]*>|
 // For labelled values: templating anywhere, placeholder words at the edges.
 // Placeholder words count only as the whole value or a separated leading/trailing word.
 const PLACEHOLDER =
-  /\*{3,}|\.{3}|<[^>]*>|\$\{|\{\{|%\(|^\$|process\.env|os\.environ|getenv|REDACTED|^(?:your|example|dummy|sample|fake|placeholder|changeme|change[-_]me|replace[-_]?me|insert|todo|none|null|undefined|true|false|secret|password|token)(?:$|[-_ .])|[-_ ](?:here|example|placeholder)$/i
+  /\*{3,}|\.{3}|<[^>]*>|\$\{|\{\{|%\(|^\$|process\.env|os\.environ|getenv|REDACTED|^(?:your|example|dummy|sample|fake|placeholder|changeme|change[-_]me|replace[-_]?me|insert|todo)(?:$|[-_ .])|^(?:none|null|undefined|true|false|secret|password|token)$|[-_ ](?:here|example|placeholder)$/i
 const PADDING = /x{6,}|X{6,}/
 
 function entropy(text: string): number {
@@ -212,17 +283,30 @@ function isPathLike(value: string): boolean {
 
 // A value under a free-form name must look like a credential, not a word, a
 // path or an identifier. Entropy decides the rest.
-function shapedLooksReal(value: string): boolean {
-  // A dictionary-looking word, or a short all-letter value.
-  if (/^[A-Za-z]+$/.test(value) && (/^(?:[a-z]+|[A-Z][a-z]+|[A-Z]+)$/.test(value) || value.length < 16)) return false
+function shapedLooksReal(value: string, password = false): boolean {
+  // A short all-letter value reads as a word; a long one is a passphrase.
+  if (/^[A-Za-z]+$/.test(value) && value.length < 16) return false
   if (isPathLike(value)) return false
+  // The name of an environment variable (`DB_PASSWORD_PROD`), not its value.
+  if (isEnvName(value)) return false
   // kebab/snake identifiers: several lowercase segments, at least one a plain word.
+  // kebab/snake identifiers: short lowercase segments, at least one a plain word,
+  // none a long hex or base62 run (`prod-9f3a…`, `npm_…`). Under a password name a
+  // word-shaped value is a passphrase, so the exemption does not apply there.
   const segments = value.split(/[-_.]/)
-  if (segments.length >= 2 && segments.every(s => /^[a-z0-9]*$/.test(s)) && segments.some(s => /^[a-z]{3,}$/.test(s))) {
+  if (
+    !password &&
+    segments.length >= 2 &&
+    segments.every(s => /^[a-z0-9]{0,16}$/.test(s)) &&
+    segments.some(s => /^[a-z]{3,}$/.test(s)) &&
+    !segments.some(s => /^[0-9a-f]{12,}$/.test(s))
+  ) {
     return false
   }
   return true
 }
+
+const PASSWORD_NAME = /pass(?:word|wd|phrase)?|pwd/i
 
 export function findSecrets(text: string): Finding[] {
   const found: Finding[] = []
@@ -242,7 +326,12 @@ export function findSecrets(text: string): Finding[] {
         reject()
         continue
       }
-      if (rule.name !== undefined && !nameIsSecret(m[rule.name] ?? '')) {
+      const name = rule.name !== undefined ? (m[rule.name] ?? '') : ''
+      if (rule.name !== undefined && !nameIsSecret(name)) {
+        reject()
+        continue
+      }
+      if (rule.name !== undefined && nameRole(name) === 'pointer' && looksLikePointer(value)) {
         reject()
         continue
       }
@@ -255,7 +344,8 @@ export function findSecrets(text: string): Finding[] {
         reject()
         continue
       }
-        if (rule.shaped === true && !shapedLooksReal(value)) {
+        const password = PASSWORD_NAME.test(rule.name !== undefined ? name : (m[0] ?? '').trim().split(/[=\s]/)[0] ?? '')
+        if (rule.shaped === true && !shapedLooksReal(value, password)) {
         reject()
         continue
       }

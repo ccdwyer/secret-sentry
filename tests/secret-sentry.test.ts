@@ -15,6 +15,8 @@ const OPAQUE = d("Md3Yz7Ig9Ex2Mp8Ja1LoUw0Qs4Dc")
 
 const person = (text: string) => ({ text, wait: false, origin: { kind: 'composer' as const } })
 const hits = (s: string) => findSecrets(s).length
+// `name = "value"`, built at run time so this file holds no assignment shape.
+const assign = (name: string, value: string) => [name, ' = ', '"', value, '"'].join('')
 
 test('detectors find real shapes', () => {
   for (const s of [
@@ -129,6 +131,59 @@ test('redaction is exact', () => {
   expect(redact(tail).text).toBe(d("[ERQNPGRQ:cevingr-xrl]\nnaq gura abgrf"))
   expect(nameIsSecret('SECRETARY_EMAIL')).toBe(false)
   expect(nameIsSecret('clientSecret')).toBe(true)
+})
+
+test('names that point at a secret are exempt only when the value is a pointer', () => {
+  // Metadata and opaque ids are never credentials.
+  for (const name of ['refresh_token_id', 'private_key_id', 'tokenExpiresAt', 'token_count', 'SECRETARY_EMAIL']) {
+    expect(nameIsSecret(name)).toBe(false)
+  }
+  for (const name of ['access_token', 'REFRESH_TOKEN', 'db_password', 'clientSecret', 'secret_id', 'VAULT_SECRET_ID', 'password_hash']) {
+    expect(nameIsSecret(name)).toBe(true)
+  }
+  expect(hits('refresh_token_id: "' + d('xC4iE7zK2dY9gJ3m') + '"')).toBe(0)
+  expect(hits('tokenExpiresAt = "2026-10-02T15:47:38Z"')).toBe(0)
+  // Pointer names with pointer values: paths, env names, ARNs, file and header names.
+  expect(hits('ACCESS_TOKEN_FILE=/run/secrets/access_token')).toBe(0)
+  expect(hits('API_KEY_PATH=./config/api-key.txt')).toBe(0)
+  expect(hits('PASSWORD_ENV=DB_PASSWORD_PROD')).toBe(0)
+  expect(hits('SECRET_KEY_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:prod')).toBe(0)
+  expect(hits('api_key_header: "X-Api-Key"')).toBe(0)
+  // Pointer names holding the secret itself are still caught.
+  expect(hits('PASSWORD_FILE=' + d('PbeerpgUbefrOnggrelFgncyr44!'))).toBe(1)
+  expect(hits('ACCESS_TOKEN_FILE=' + d('5678901234nopqrs'))).toBe(1)
+  expect(hits([JSON.stringify('secret_id'), ': ', JSON.stringify(d('f.2s8nD4zX7iY3kE9gJ1mO6a'))].join(''))).toBe(1)
+})
+
+test('env names are not values; passphrases and codes are', () => {
+  expect(hits('DB_PASSWORD=DB_PASSWORD_PROD')).toBe(0)
+  expect(hits('DB_PASSWORD=DB_PASSWORD_V2')).toBe(0)
+  expect(hits('DB_PASSWORD=' + d('PBEERPG_UBEFR_ONGGREL_FGNCYR'))).toBe(1)
+  expect(hits('API_KEY=' + d('NO67_PQ89_RS01'))).toBe(1)
+})
+
+test('word-shaped values are passphrases under password names, ids elsewhere', () => {
+  expect(hits('DB_PASSWORD=' + d('pbeerpg-ubefr-onggrel-fgncyr'))).toBe(1)
+  expect(hits('mysql --password=' + d('pbeerpg-ubefr-onggrel-fgncyr'))).toBe(1)
+  expect(hits(assign('password', d('pbeerpgubefronggrelfgncyr')))).toBe(1)
+  expect(hits('docker run --secret my-app-database-password')).toBe(0)
+  expect(hits('API_KEY=' + d('cebq-4s8n7p3o6q5r9s1n3o5p6q7r8s9n0o1p'))).toBe(1)
+  expect(hits('NPM_TOKEN=' + d('acz_4s8n7p3o6q5r9s1n3o5p6q7r8s9n0o1p2q3r'))).toBe(1)
+  // A placeholder word as a prefix no longer hides a real value.
+  expect(hits(assign('password', d('frperg-X2zC4kD7aE9jY3')))).toBe(1)
+  expect(hits('password = "password"')).toBe(0)
+  // Unquoted YAML passphrase with spaces.
+  expect(hits('password: ' + d('pbeerpg ubefr onggrel fgncyr'))).toBe(1)
+})
+
+test('command-line and URL credential shapes', () => {
+  expect(hits('curl -u' + d('nqzva') + ':' + d('Gd4iE7zX2kY9') + ' https://api.internal')).toBe(1)
+  expect(hits(d('erqvf') + '://:' + d('Gd4iE7zX2kY9') + '@cache.internal:6379')).toBe(1)
+  expect(hits(d('cbfgterf') + '://' + d('nqzva') + ':' + d('no/pqRSTU67') + '@db.internal/app')).toBe(1)
+  // A port and path after the host is not a password.
+  expect(hits('https://example.com:8080/path@section')).toBe(0)
+  // A bare ?key= is an object or cache key.
+  expect(hits('curl "https://cdn.example.com/x?key=' + d('nopqrs5678901234nopqrs') + '"')).toBe(0)
 })
 
 test(d("n cnfgrq frperg vf erqnpgrq orsber gur zbqry frrf vg, pbagrkg gbb"), async ($, on) => {

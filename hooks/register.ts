@@ -156,8 +156,9 @@ export const register: Register = on => {
       return next(e)
     }
 
-    // More markers than the file already had means real values would be overwritten.
-    if (markers(wrote) > markers(before)) return { deny: hidden('this content') }
+    // A marker line the file did not already have means a real value would be overwritten.
+    // Compared line by line, so moving the one existing marker onto a real value is caught too.
+    if (markers(wrote) > 0 && !markerLinesKept(before, wrote)) return { deny: hidden('this content') }
     const found = introduced(before, after)
     if (found.length === 0 || (await mayHoldSecrets($, path))) return next(e)
     await count($, found, 'blocked')
@@ -183,13 +184,29 @@ async function readText($: EngineInterface, path: string): Promise<string | null
 
 const unreadable =
   'secret-sentry: this file exists but could not be read (it may be too large), so the change ' +
-  'cannot be checked for credentials. Make a smaller change with Bash tools, or ask the user.'
+  'cannot be checked for credentials. Ask the user how to proceed.'
+
+// Every line of `wrote` that carries a marker is already in `before`, as often.
+function markerLinesKept(before: string, wrote: string): boolean {
+  const had = new Map<string, number>()
+  for (const line of before.split('\n')) if (line.includes(MARK)) had.set(line, (had.get(line) ?? 0) + 1)
+  for (const line of wrote.split('\n')) {
+    if (!line.includes(MARK)) continue
+    const left = had.get(line) ?? 0
+    if (left === 0) return false
+    had.set(line, left - 1)
+  }
+  return true
+}
 
 // One notebook cell's source, or '' when the notebook or cell cannot be read.
 function cellSource(notebook: string, id: string | undefined): string {
   try {
     const cells = (JSON.parse(notebook) as { cells?: { id?: string; source?: string | string[] }[] }).cells ?? []
-    const cell = id === undefined ? cells[0] : cells.find(c => c.id === id)
+    // Without an id the replaced cell is unknown: compare against nothing, so any
+    // credential in the new source counts as new.
+    if (id === undefined) return ''
+    const cell = cells.find(c => c.id === id)
     const source = cell?.source ?? ''
     return Array.isArray(source) ? source.join('') : source
   } catch {

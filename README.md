@@ -1,5 +1,9 @@
 # Secret Sentry
 
+![Secret Sentry demo](media/demo.gif)
+
+A key read from a file reaches the model as `[REDACTED:stripe-key]`, and an attempt to hardcode a live key into a tracked file is refused (screenshots: [redacted read](media/01-redacted-read.png), [write refused](media/02-write-refused.png)).
+
 A Claude Code mod that keeps credentials out of the model's context and out of your repo.
 
 **In (redaction)**

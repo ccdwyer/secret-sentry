@@ -1,0 +1,13 @@
+{
+  "name": "secret-sentry",
+  "owner": {
+    "name": "Chris Dwyer"
+  },
+  "plugins": [
+    {
+      "name": "secret-sentry",
+      "source": "./",
+      "description": "Two-way secret scrubbing: redacts credentials before the model sees them and blocks writing them into tracked files or shell commands"
+    }
+  ]
+}

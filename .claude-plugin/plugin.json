@@ -1,0 +1,11 @@
+{
+  "name": "secret-sentry",
+  "version": "0.1.0",
+  "description": "Two-way secret scrubbing: redacts credentials before the model sees them and blocks writing them into tracked files or shell commands",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Chris Dwyer",
+    "url": "https://github.com/ccdwyer"
+  },
+  "repository": "https://github.com/ccdwyer/secret-sentry"
+}

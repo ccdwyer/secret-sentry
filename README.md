@@ -37,3 +37,19 @@ The mod never stores or echoes a secret: state holds only counts per kind. The s
 claude plugin validate .
 claude plugin test .
 ```
+
+## What it hooks
+
+Events this mod hooks, as `claude plugin validate` reads the module:
+
+- `prompt.submit`
+- `session.append`
+- `tool.call`
+
+Engine calls it makes: `$.fs.exists (via readText)`, `$.fs.read (via readText)`, `$.fs.stat (via place)`, `$.process.run (via git)`, `$.state.get`, `$.state.set`, `$.ui.status (via tallyUp)`, `$.ui.toast`.
+
+A `tool.call` hook sits in the middle of every tool call: it can see the call, refuse it, or add context to its result. This mod uses that only for the behaviour described above.
+
+## License
+
+MIT
